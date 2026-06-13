@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import csv
+import json
 import sys
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from math import cos, log10, pi, radians, sin
 from typing import Dict, Iterable, List, Optional, Union
 
@@ -15,6 +17,8 @@ except ImportError as exc:
 
 BAR_TO_PA = 100_000.0
 IN_TO_M = 0.0254
+FT_TO_M = 0.3048
+LBM_TO_KG = 0.45359237
 PA_TO_BAR = 1.0 / BAR_TO_PA
 PA_TO_PSI = 0.0001450377377
 PSI_TO_PA = 6894.757293
@@ -1178,7 +1182,7 @@ def default_lox_case() -> tuple[FlowCase, List[ComponentSpec]]:
 
 def launch_gui() -> None:
     import tkinter as tk
-    from tkinter import messagebox, ttk
+    from tkinter import filedialog, messagebox, ttk
 
     flow_case, component_specs = default_lox_case()
     fluid_label_to_key = {
@@ -1210,10 +1214,49 @@ def launch_gui() -> None:
     def number_var(value: float) -> tk.StringVar:
         return tk.StringVar(value=f"{value:g}")
 
+    pressure_unit = tk.StringVar(value="bar")
+    mass_flow_unit = tk.StringVar(value="kg/s")
+    temperature_unit = tk.StringVar(value="K")
+    length_unit = tk.StringVar(value="m")
+
+    def pressure_to_pa(value: float) -> float:
+        return value * BAR_TO_PA if pressure_unit.get() == "bar" else value * PSI_TO_PA
+
+    def pressure_from_pa(value_pa: float) -> float:
+        return value_pa * PA_TO_BAR if pressure_unit.get() == "bar" else value_pa * PA_TO_PSI
+
+    def mass_flow_to_kg_s(value: float) -> float:
+        return value if mass_flow_unit.get() == "kg/s" else value * LBM_TO_KG
+
+    def mass_flow_from_kg_s(value_kg_s: float) -> float:
+        return value_kg_s if mass_flow_unit.get() == "kg/s" else value_kg_s / LBM_TO_KG
+
+    def temperature_to_k(value: float) -> float:
+        return value if temperature_unit.get() == "K" else value + 273.15
+
+    def temperature_from_k(value_k: float) -> float:
+        return value_k if temperature_unit.get() == "K" else value_k - 273.15
+
+    def length_to_m(value: float) -> float:
+        unit = length_unit.get()
+        if unit == "m":
+            return value
+        if unit == "ft":
+            return value * FT_TO_M
+        return value * IN_TO_M
+
+    def length_from_m(value_m: float) -> float:
+        unit = length_unit.get()
+        if unit == "m":
+            return value_m
+        if unit == "ft":
+            return value_m / FT_TO_M
+        return value_m / IN_TO_M
+
     selected_fluid_label = tk.StringVar(value=str(FLUID_CATALOG[flow_case.fluid]["label"]))
-    inlet_pressure_bar = number_var(flow_case.inlet_pressure_pa * PA_TO_BAR)
-    mass_flow = number_var(flow_case.mass_flow_kg_s)
-    temperature_k = number_var(flow_case.temperature_k)
+    inlet_pressure = number_var(pressure_from_pa(flow_case.inlet_pressure_pa))
+    mass_flow = number_var(mass_flow_from_kg_s(flow_case.mass_flow_kg_s))
+    temperature = number_var(temperature_from_k(flow_case.temperature_k))
     default_size_label = next(
         label
         for label, size in CRANE_SIZE_VALUE_BY_LABEL.items()
@@ -1230,7 +1273,7 @@ def launch_gui() -> None:
     selected_component_label = tk.StringVar(value=COMPONENT_CATALOG["pipe"]["label"])
     component_name = tk.StringVar(value=COMPONENT_CATALOG["pipe"]["label"])
     component_quantity = tk.StringVar(value="1")
-    component_length_m = tk.StringVar(value="10")
+    component_length = tk.StringVar(value="10")
     length_label_widget: Optional[ttk.Label] = None
     length_entry_widget: Optional[ttk.Entry] = None
     tee_flow_pattern = tk.StringVar(value="joining: branch + straight -> one outlet")
@@ -1283,9 +1326,9 @@ def launch_gui() -> None:
         selected_size_in = CRANE_SIZE_VALUE_BY_LABEL[selected_pipe_size_label.get()]
         return FlowCase(
             fluid=fluid_label_to_key[selected_fluid_label.get()],
-            temperature_k=parse_float(temperature_k, "Temperature"),
-            inlet_pressure_pa=parse_float(inlet_pressure_bar, "Inlet pressure") * BAR_TO_PA,
-            mass_flow_kg_s=parse_float(mass_flow, "Mass flow"),
+            temperature_k=temperature_to_k(parse_float(temperature, "Temperature", positive=False)),
+            inlet_pressure_pa=pressure_to_pa(parse_float(inlet_pressure, "Inlet pressure")),
+            mass_flow_kg_s=mass_flow_to_kg_s(parse_float(mass_flow, "Mass flow")),
             pipe_inner_diameter_m=selected_size_in * IN_TO_M,
             nominal_size_in=selected_size_in,
             roughness_m=ROUGHNESS_UM_BY_LABEL[selected_roughness_label.get()] * 1e-6,
@@ -1293,9 +1336,10 @@ def launch_gui() -> None:
 
     def refresh_component_tree() -> None:
         component_tree.delete(*component_tree.get_children())
+        component_tree.heading("length", text=f"Length {length_unit.get()}")
         for index, spec in enumerate(component_specs, start=1):
             label = COMPONENT_CATALOG[spec.catalog_key]["label"]
-            length_text = "" if spec.length_m is None else f"{spec.length_m:g}"
+            length_text = "" if spec.length_m is None else f"{length_from_m(spec.length_m):g}"
             details_text = ""
             if COMPONENT_CATALOG[spec.catalog_key]["kind"] == "tee_wye":
                 flow_text = "joining" if spec.tee_flow_mode == "converging" else "splitting"
@@ -1355,8 +1399,8 @@ def launch_gui() -> None:
         if saturation_pressure_pa is not None:
             margins = [row.pressure_out_pa - saturation_pressure_pa for row in rows]
             min_margin_pa = min(margins)
-            psat_lines.append(f"Psat: {saturation_pressure_pa * PA_TO_BAR:.3f} bar")
-            psat_lines.append(f"Min Psat margin: {min_margin_pa * PA_TO_BAR:.3f} bar")
+            psat_lines.append(f"Psat: {pressure_from_pa(saturation_pressure_pa):.3f} {pressure_unit.get()}")
+            psat_lines.append(f"Min Psat margin: {pressure_from_pa(min_margin_pa):.3f} {pressure_unit.get()}")
             if min_margin_pa < 0.0:
                 warnings.append("Below saturation")
             elif min_margin_pa < 5.0 * BAR_TO_PA:
@@ -1369,12 +1413,12 @@ def launch_gui() -> None:
         lines = [
             f"Status: {status}",
             f"Fluid: {entry['label']}",
-            f"Total dP: {total_dp_pa * PA_TO_BAR:.4f} bar",
-            f"Final P: {final_pressure_pa * PA_TO_BAR:.3f} bar",
+            f"Total dP: {pressure_from_pa(total_dp_pa):.4f} {pressure_unit.get()}",
+            f"Final P: {pressure_from_pa(final_pressure_pa):.3f} {pressure_unit.get()}",
             f"dP / inlet P: {100.0 * total_dp_fraction:.1f}%",
             "",
             f"Largest loss: {largest_loss.component}",
-            f"  {largest_loss.delta_p_pa * PA_TO_BAR:.4f} bar",
+            f"  {pressure_from_pa(largest_loss.delta_p_pa):.4f} {pressure_unit.get()}",
             f"Max velocity: {max_velocity.velocity_m_s:.2f} m/s",
             f"  at {max_velocity.component}",
         ]
@@ -1388,6 +1432,12 @@ def launch_gui() -> None:
 
     def refresh_results_tree(rows: Iterable[LadderRow], case: FlowCase) -> None:
         result_tree.delete(*result_tree.get_children())
+        headings["p_in_bar"] = f"P in {pressure_unit.get()}"
+        headings["dp_bar"] = f"dP {pressure_unit.get()}"
+        headings["p_out_bar"] = f"P out {pressure_unit.get()}"
+        headings["velocity"] = "v m/s"
+        for column, heading in headings.items():
+            result_tree.heading(column, text=heading)
         row_list = list(rows)
         total_dp_pa = 0.0
         final_pressure_pa = None
@@ -1402,9 +1452,9 @@ def launch_gui() -> None:
                 values=(
                     row.component,
                     row.quantity,
-                    f"{row.pressure_in_pa * PA_TO_BAR:.3f}",
-                    f"{row.delta_p_pa * PA_TO_BAR:.5f}",
-                    f"{row.pressure_out_pa * PA_TO_BAR:.3f}",
+                    f"{pressure_from_pa(row.pressure_in_pa):.3f}",
+                    f"{pressure_from_pa(row.delta_p_pa):.5f}",
+                    f"{pressure_from_pa(row.pressure_out_pa):.3f}",
                     f"{row.delta_p_pa * PA_TO_PSI:.4f}",
                     f"{row.velocity_m_s:.3f}",
                     f"{row.reynolds:.3e}",
@@ -1416,9 +1466,9 @@ def launch_gui() -> None:
             summary_text.set("No components in ladder.")
         else:
             summary_text.set(
-                f"Total dP = {total_dp_pa * PA_TO_BAR:.5f} bar "
+                f"Total dP = {pressure_from_pa(total_dp_pa):.5f} {pressure_unit.get()} "
                 f"({total_dp_pa * PA_TO_PSI:.4f} psi)    "
-                f"Final pressure = {final_pressure_pa * PA_TO_BAR:.3f} bar"
+                f"Final pressure = {pressure_from_pa(final_pressure_pa):.3f} {pressure_unit.get()}"
             )
         diagnostics_text.set(build_diagnostics(row_list, case))
 
@@ -1437,6 +1487,111 @@ def launch_gui() -> None:
         root.clipboard_clear()
         root.clipboard_append("\n".join(lines))
         summary_text.set(f"Copied {len(item_ids)} result row(s) to clipboard.")
+
+    def component_from_form() -> ComponentSpec:
+        label = selected_component_label.get()
+        key = label_to_key[label]
+        kind = COMPONENT_CATALOG[key]["kind"]
+        quantity = parse_int(component_quantity, "Quantity")
+        name = component_name.get().strip() or label
+        length_m = None
+        tee_kwargs: Dict[str, object] = {}
+        transition_kwargs: Dict[str, object] = {}
+        custom_kwargs: Dict[str, object] = {}
+
+        if kind == "pipe":
+            length_m = length_to_m(parse_float(component_length, "Pipe length"))
+        elif kind == "tee_wye":
+            catalog_entry = COMPONENT_CATALOG[key]
+            angle = (
+                float(catalog_entry["fixed_angle_deg"])
+                if "fixed_angle_deg" in catalog_entry
+                else parse_float(tee_angle_deg, "Tee/wye angle")
+            )
+            tee_kwargs = {
+                "tee_flow_mode": tee_flow_pattern_to_mode[tee_flow_pattern.get()],
+                "tee_loss_path": tee_loss_path_to_key[tee_loss_path_display.get()],
+                "tee_angle_deg": angle,
+                "tee_q_branch_over_q_comb": parse_float(tee_q_ratio, "Branch flow fraction"),
+                "tee_beta_branch": parse_float(tee_beta_branch, "Branch diameter ratio"),
+            }
+        elif kind == "transition":
+            transition_kwargs = {
+                "transition_angle_deg": parse_float(transition_angle_deg, "Transition angle"),
+                "transition_beta": parse_float(transition_beta, "Transition diameter ratio"),
+            }
+        elif kind == "custom_k":
+            custom_kwargs = {"custom_k": parse_float(custom_k_value, "Custom K", positive=False)}
+        elif kind == "custom_cv":
+            custom_kwargs = {"custom_cv": parse_float(custom_cv_value, "Custom Cv")}
+        elif kind == "custom_cda":
+            custom_kwargs = {"custom_cda_mm2": parse_float(custom_cda_mm2, "Custom CdA")}
+        elif kind == "multiple_90_bends":
+            custom_kwargs = {
+                "bend_count": parse_int(bend_count, "Bend count"),
+                "bend_r_over_d": parse_float(bend_r_over_d, "Bend r/d"),
+            }
+        elif kind == "reduced_port":
+            custom_kwargs = {
+                "reduced_port_formula": parse_int(reduced_formula, "Reduced-port formula"),
+                "reduced_port_k1": parse_float(reduced_k1, "Reduced-port K1", positive=False),
+                "reduced_port_beta": parse_float(reduced_beta, "Reduced-port beta"),
+                "reduced_port_angle_deg": parse_float(reduced_angle_deg, "Reduced-port angle", positive=False),
+            }
+
+        return ComponentSpec(
+            name=name,
+            catalog_key=key,
+            quantity=quantity,
+            length_m=length_m,
+            **tee_kwargs,
+            **transition_kwargs,
+            **custom_kwargs,
+        )
+
+    def load_component_into_form(spec: ComponentSpec) -> None:
+        catalog_entry = COMPONENT_CATALOG[spec.catalog_key]
+        selected_component_label.set(str(catalog_entry["label"]))
+        component_name.set(spec.name)
+        component_quantity.set(str(spec.quantity))
+        component_length.set("" if spec.length_m is None else f"{length_from_m(spec.length_m):g}")
+        if spec.tee_flow_mode:
+            for display, mode in tee_flow_pattern_to_mode.items():
+                if mode == spec.tee_flow_mode:
+                    tee_flow_pattern.set(display)
+        if spec.tee_loss_path:
+            for display, path in tee_loss_path_to_key.items():
+                if path == spec.tee_loss_path:
+                    tee_loss_path_display.set(display)
+        if spec.tee_angle_deg is not None:
+            tee_angle_deg.set(f"{spec.tee_angle_deg:g}")
+        if spec.tee_q_branch_over_q_comb is not None:
+            tee_q_ratio.set(f"{spec.tee_q_branch_over_q_comb:g}")
+        if spec.tee_beta_branch is not None:
+            tee_beta_branch.set(f"{spec.tee_beta_branch:g}")
+        if spec.transition_angle_deg is not None:
+            transition_angle_deg.set(f"{spec.transition_angle_deg:g}")
+        if spec.transition_beta is not None:
+            transition_beta.set(f"{spec.transition_beta:g}")
+        if spec.custom_k is not None:
+            custom_k_value.set(f"{spec.custom_k:g}")
+        if spec.custom_cv is not None:
+            custom_cv_value.set(f"{spec.custom_cv:g}")
+        if spec.custom_cda_mm2 is not None:
+            custom_cda_mm2.set(f"{spec.custom_cda_mm2:g}")
+        if spec.bend_count is not None:
+            bend_count.set(str(spec.bend_count))
+        if spec.bend_r_over_d is not None:
+            bend_r_over_d.set(f"{spec.bend_r_over_d:g}")
+        if spec.reduced_port_formula is not None:
+            reduced_formula.set(str(spec.reduced_port_formula))
+        if spec.reduced_port_k1 is not None:
+            reduced_k1.set(f"{spec.reduced_port_k1:g}")
+        if spec.reduced_port_beta is not None:
+            reduced_beta.set(f"{spec.reduced_port_beta:g}")
+        if spec.reduced_port_angle_deg is not None:
+            reduced_angle_deg.set(f"{spec.reduced_port_angle_deg:g}")
+        update_component_option_visibility()
 
     def selected_component_index() -> Optional[int]:
         selection = component_tree.selection()
@@ -1479,8 +1634,8 @@ def launch_gui() -> None:
 
     def apply_fluid_defaults(*_: object) -> None:
         entry = FLUID_CATALOG[fluid_label_to_key[selected_fluid_label.get()]]
-        temperature_k.set(f"{float(entry['default_temperature_k']):g}")
-        inlet_pressure_bar.set(f"{float(entry['default_pressure_bar']):g}")
+        temperature.set(f"{temperature_from_k(float(entry['default_temperature_k'])):g}")
+        inlet_pressure.set(f"{pressure_from_pa(float(entry['default_pressure_bar']) * BAR_TO_PA):g}")
 
     def update_component_option_visibility() -> None:
         key = label_to_key[selected_component_label.get()]
@@ -1499,12 +1654,12 @@ def launch_gui() -> None:
             frame.grid_remove()
         if length_label_widget is not None and length_entry_widget is not None:
             if kind == "pipe":
-                length_label_widget.configure(text="Pipe length m")
+                length_label_widget.configure(text=f"Pipe length ({length_unit.get()})")
                 length_entry_widget.configure(state="normal")
             else:
-                length_label_widget.configure(text="Pipe length m")
+                length_label_widget.configure(text=f"Pipe length ({length_unit.get()})")
                 length_entry_widget.configure(state="disabled")
-                component_length_m.set("")
+                component_length.set("")
         if kind == "tee_wye":
             tee_options.grid()
             if "fixed_angle_deg" in catalog_entry:
@@ -1534,73 +1689,34 @@ def launch_gui() -> None:
         component_name.set(label)
         key = label_to_key[label]
         if COMPONENT_CATALOG[key]["kind"] == "pipe":
-            component_length_m.set("10")
+            component_length.set("10")
         else:
-            component_length_m.set("")
+            component_length.set("")
         update_component_option_visibility()
 
     def add_component() -> None:
         try:
-            label = selected_component_label.get()
-            key = label_to_key[label]
-            kind = COMPONENT_CATALOG[key]["kind"]
-            quantity = parse_int(component_quantity, "Quantity")
-            name = component_name.get().strip() or label
-            length_m = None
-            tee_kwargs: Dict[str, object] = {}
-            transition_kwargs: Dict[str, object] = {}
-            custom_kwargs: Dict[str, object] = {}
-            if kind == "pipe":
-                length_m = parse_float(component_length_m, "Pipe length")
-            elif kind == "tee_wye":
-                catalog_entry = COMPONENT_CATALOG[key]
-                angle = (
-                    float(catalog_entry["fixed_angle_deg"])
-                    if "fixed_angle_deg" in catalog_entry
-                    else parse_float(tee_angle_deg, "Tee/wye angle")
-                )
-                tee_kwargs = {
-                    "tee_flow_mode": tee_flow_pattern_to_mode[tee_flow_pattern.get()],
-                    "tee_loss_path": tee_loss_path_to_key[tee_loss_path_display.get()],
-                    "tee_angle_deg": angle,
-                    "tee_q_branch_over_q_comb": parse_float(tee_q_ratio, "Branch flow fraction"),
-                    "tee_beta_branch": parse_float(tee_beta_branch, "Branch diameter ratio"),
-                }
-            elif kind == "transition":
-                transition_kwargs = {
-                    "transition_angle_deg": parse_float(transition_angle_deg, "Transition angle"),
-                    "transition_beta": parse_float(transition_beta, "Transition diameter ratio"),
-                }
-            elif kind == "custom_k":
-                custom_kwargs = {"custom_k": parse_float(custom_k_value, "Custom K", positive=False)}
-            elif kind == "custom_cv":
-                custom_kwargs = {"custom_cv": parse_float(custom_cv_value, "Custom Cv")}
-            elif kind == "custom_cda":
-                custom_kwargs = {"custom_cda_mm2": parse_float(custom_cda_mm2, "Custom CdA")}
-            elif kind == "multiple_90_bends":
-                custom_kwargs = {
-                    "bend_count": parse_int(bend_count, "Bend count"),
-                    "bend_r_over_d": parse_float(bend_r_over_d, "Bend r/d"),
-                }
-            elif kind == "reduced_port":
-                custom_kwargs = {
-                    "reduced_port_formula": parse_int(reduced_formula, "Reduced-port formula"),
-                    "reduced_port_k1": parse_float(reduced_k1, "Reduced-port K1", positive=False),
-                    "reduced_port_beta": parse_float(reduced_beta, "Reduced-port beta"),
-                    "reduced_port_angle_deg": parse_float(reduced_angle_deg, "Reduced-port angle", positive=False),
-                }
-            component_specs.append(
-                ComponentSpec(
-                    name=name,
-                    catalog_key=key,
-                    quantity=quantity,
-                    length_m=length_m,
-                    **tee_kwargs,
-                    **transition_kwargs,
-                    **custom_kwargs,
-                )
-            )
+            component_specs.append(component_from_form())
             refresh_component_tree()
+        except ValueError as exc:
+            messagebox.showerror("Input error", str(exc))
+
+    def edit_selected_component() -> None:
+        index = selected_component_index()
+        if index is None:
+            return
+        load_component_into_form(component_specs[index])
+        summary_text.set("Loaded selected component into editor.")
+
+    def update_selected_component() -> None:
+        index = selected_component_index()
+        if index is None:
+            return
+        try:
+            component_specs[index] = component_from_form()
+            refresh_component_tree()
+            component_tree.selection_set(str(index))
+            summary_text.set("Updated selected component.")
         except ValueError as exc:
             messagebox.showerror("Input error", str(exc))
 
@@ -1638,6 +1754,95 @@ def launch_gui() -> None:
         summary_text.set("Component ladder cleared.")
         diagnostics_text.set("No results.")
 
+    def save_ladder() -> None:
+        try:
+            case = make_case_from_inputs()
+        except ValueError as exc:
+            messagebox.showerror("Input error", str(exc))
+            return
+        path = filedialog.asksaveasfilename(
+            title="Save pressure ladder",
+            defaultextension=".json",
+            filetypes=(("JSON files", "*.json"), ("All files", "*.*")),
+        )
+        if not path:
+            return
+        data = {
+            "version": 1,
+            "flow_case": asdict(case),
+            "components": [asdict(spec) for spec in component_specs],
+            "ui_units": {
+                "pressure": pressure_unit.get(),
+                "mass_flow": mass_flow_unit.get(),
+                "temperature": temperature_unit.get(),
+                "length": length_unit.get(),
+                "roughness_label": selected_roughness_label.get(),
+                "pipe_size_label": selected_pipe_size_label.get(),
+            },
+        }
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(data, handle, indent=2)
+        summary_text.set(f"Saved ladder to {path}")
+
+    def load_ladder() -> None:
+        path = filedialog.askopenfilename(
+            title="Load pressure ladder",
+            filetypes=(("JSON files", "*.json"), ("All files", "*.*")),
+        )
+        if not path:
+            return
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                data = json.load(handle)
+            loaded_case = FlowCase(**data["flow_case"])
+            loaded_components = [ComponentSpec(**item) for item in data["components"]]
+        except Exception as exc:
+            messagebox.showerror("Load error", str(exc))
+            return
+
+        ui_units = data.get("ui_units", {})
+        pressure_unit.set(ui_units.get("pressure", pressure_unit.get()))
+        mass_flow_unit.set(ui_units.get("mass_flow", mass_flow_unit.get()))
+        temperature_unit.set(ui_units.get("temperature", temperature_unit.get()))
+        length_unit.set(ui_units.get("length", length_unit.get()))
+        selected_fluid_label.set(str(FLUID_CATALOG[loaded_case.fluid]["label"]))
+        inlet_pressure.set(f"{pressure_from_pa(loaded_case.inlet_pressure_pa):g}")
+        mass_flow.set(f"{mass_flow_from_kg_s(loaded_case.mass_flow_kg_s):g}")
+        temperature.set(f"{temperature_from_k(loaded_case.temperature_k):g}")
+        selected_pipe_size_label.set(
+            next(label for label, size in CRANE_SIZE_VALUE_BY_LABEL.items() if size == loaded_case.nominal_size_in)
+        )
+        roughness_um = loaded_case.roughness_m * 1e6
+        selected_roughness_label.set(ui_units.get(
+            "roughness_label",
+            min(roughness_labels, key=lambda label: abs(ROUGHNESS_UM_BY_LABEL[label] - roughness_um)),
+        ))
+        component_specs.clear()
+        component_specs.extend(loaded_components)
+        refresh_component_tree()
+        result_tree.delete(*result_tree.get_children())
+        diagnostics_text.set("Loaded ladder. Run a calculation to refresh diagnostics.")
+        summary_text.set(f"Loaded ladder from {path}")
+
+    def export_results_csv() -> None:
+        item_ids = result_tree.get_children()
+        if not item_ids:
+            messagebox.showinfo("Export CSV", "No result rows to export.")
+            return
+        path = filedialog.asksaveasfilename(
+            title="Export pressure ladder results",
+            defaultextension=".csv",
+            filetypes=(("CSV files", "*.csv"), ("All files", "*.*")),
+        )
+        if not path:
+            return
+        with open(path, "w", newline="", encoding="utf-8") as handle:
+            writer = csv.writer(handle)
+            writer.writerow([headings[column] for column in result_columns])
+            for item_id in item_ids:
+                writer.writerow(result_tree.item(item_id, "values"))
+        summary_text.set(f"Exported results to {path}")
+
     def calculate() -> None:
         try:
             case = make_case_from_inputs()
@@ -1648,6 +1853,22 @@ def launch_gui() -> None:
             summary_text.set("Calculation failed.")
             messagebox.showerror("Calculation error", str(exc))
 
+    def on_pressure_unit_changed(*_: object) -> None:
+        summary_text.set("Pressure unit changed. Existing typed value will be interpreted in the selected unit.")
+
+    def on_mass_flow_unit_changed(*_: object) -> None:
+        summary_text.set("Mass flow unit changed. Existing typed value will be interpreted in the selected unit.")
+
+    def on_temperature_unit_changed(*_: object) -> None:
+        summary_text.set("Temperature unit changed. Existing typed value will be interpreted in the selected unit.")
+
+    def on_length_unit_changed(*_: object) -> None:
+        new = length_unit.get()
+        if length_label_widget is not None:
+            length_label_widget.configure(text=f"Pipe length ({new})")
+        refresh_component_tree()
+        summary_text.set("Length unit changed. Existing typed value will be interpreted in the selected unit.")
+
     inputs = ttk.LabelFrame(root, text="Flow case")
     inputs.grid(row=0, column=0, sticky="ew", padx=12, pady=(12, 6))
     for column in range(14):
@@ -1655,9 +1876,9 @@ def launch_gui() -> None:
 
     input_fields = [
         ("Fluid", selected_fluid_label),
-        ("P inlet (bar)", inlet_pressure_bar),
-        ("mdot (kg/s)", mass_flow),
-        ("T (K)", temperature_k),
+        ("P inlet", inlet_pressure),
+        ("mdot", mass_flow),
+        ("T", temperature),
         ("Pipe size", selected_pipe_size_label),
         ("Surface roughness", selected_roughness_label),
     ]
@@ -1694,6 +1915,28 @@ def launch_gui() -> None:
         else:
             ttk.Entry(inputs, textvariable=var, width=11).grid(row=0, column=column * 2 + 1, sticky="ew", padx=(0, 8), pady=8)
 
+    unit_fields = [
+        ("Pressure unit", pressure_unit, ("bar", "psi")),
+        ("Mass flow unit", mass_flow_unit, ("kg/s", "lbm/s")),
+        ("Temperature unit", temperature_unit, ("K", "C")),
+        ("Length unit", length_unit, ("m", "ft", "in")),
+    ]
+    for column, (label, var, values) in enumerate(unit_fields):
+        base_column = (column + 1) * 2
+        ttk.Label(inputs, text=label).grid(row=1, column=base_column, sticky="w", padx=(8, 4), pady=(0, 8))
+        unit_menu = ttk.Combobox(inputs, textvariable=var, values=values, state="readonly", width=9)
+        unit_menu.grid(
+            row=1, column=base_column + 1, sticky="ew", padx=(0, 8), pady=(0, 8)
+        )
+        if label == "Pressure unit":
+            unit_menu.bind("<<ComboboxSelected>>", on_pressure_unit_changed)
+        elif label == "Mass flow unit":
+            unit_menu.bind("<<ComboboxSelected>>", on_mass_flow_unit_changed)
+        elif label == "Temperature unit":
+            unit_menu.bind("<<ComboboxSelected>>", on_temperature_unit_changed)
+        elif label == "Length unit":
+            unit_menu.bind("<<ComboboxSelected>>", on_length_unit_changed)
+
     builder = ttk.LabelFrame(root, text="Add component")
     builder.grid(row=1, column=0, sticky="ew", padx=12, pady=6)
     for column in range(10):
@@ -1714,9 +1957,9 @@ def launch_gui() -> None:
     ttk.Entry(builder, textvariable=component_name, width=28).grid(row=0, column=3, sticky="ew", padx=(0, 8), pady=8)
     ttk.Label(builder, text="Qty").grid(row=0, column=4, sticky="w", padx=(8, 4), pady=8)
     ttk.Entry(builder, textvariable=component_quantity, width=7).grid(row=0, column=5, sticky="ew", padx=(0, 8), pady=8)
-    length_label_widget = ttk.Label(builder, text="Pipe length m")
+    length_label_widget = ttk.Label(builder, text=f"Pipe length ({length_unit.get()})")
     length_label_widget.grid(row=0, column=6, sticky="w", padx=(8, 4), pady=8)
-    length_entry_widget = ttk.Entry(builder, textvariable=component_length_m, width=9)
+    length_entry_widget = ttk.Entry(builder, textvariable=component_length, width=9)
     length_entry_widget.grid(row=0, column=7, sticky="ew", padx=(0, 8), pady=8)
     ttk.Button(builder, text="Add", command=add_component).grid(row=0, column=8, sticky="ew", padx=(8, 4), pady=8)
     ttk.Button(builder, text="Calculate", command=calculate).grid(row=0, column=9, sticky="ew", padx=(4, 8), pady=8)
@@ -1859,7 +2102,7 @@ def launch_gui() -> None:
     component_tree.heading("name", text="Name")
     component_tree.heading("type", text="Type")
     component_tree.heading("qty", text="Qty")
-    component_tree.heading("length", text="Length m")
+    component_tree.heading("length", text=f"Length {length_unit.get()}")
     component_tree.heading("details", text="Details")
     component_tree.column("#", width=44, anchor="center", stretch=False)
     component_tree.column("name", width=220)
@@ -1870,6 +2113,7 @@ def launch_gui() -> None:
     component_tree.grid(row=0, column=0, sticky="nsew")
     component_tree.bind("<ButtonPress-1>", on_component_drag_start)
     component_tree.bind("<ButtonRelease-1>", on_component_drag_release)
+    component_tree.bind("<Double-1>", lambda _event: edit_selected_component())
 
     component_scroll = ttk.Scrollbar(components_frame, orient="vertical", command=component_tree.yview)
     component_tree.configure(yscrollcommand=component_scroll.set)
@@ -1878,9 +2122,14 @@ def launch_gui() -> None:
     component_buttons = ttk.Frame(root)
     component_buttons.grid(row=3, column=0, sticky="ew", padx=12, pady=(0, 6))
     ttk.Button(component_buttons, text="Remove Selected", command=remove_selected_component).pack(side="left", padx=(0, 6))
+    ttk.Button(component_buttons, text="Edit Selected", command=edit_selected_component).pack(side="left", padx=6)
+    ttk.Button(component_buttons, text="Update Selected", command=update_selected_component).pack(side="left", padx=6)
     ttk.Button(component_buttons, text="Move Up", command=lambda: move_selected(-1)).pack(side="left", padx=6)
     ttk.Button(component_buttons, text="Move Down", command=lambda: move_selected(1)).pack(side="left", padx=6)
     ttk.Button(component_buttons, text="Load Default", command=load_default_components).pack(side="left", padx=6)
+    ttk.Button(component_buttons, text="Save JSON", command=save_ladder).pack(side="left", padx=6)
+    ttk.Button(component_buttons, text="Load JSON", command=load_ladder).pack(side="left", padx=6)
+    ttk.Button(component_buttons, text="Export CSV", command=export_results_csv).pack(side="left", padx=6)
     ttk.Button(component_buttons, text="Clear", command=clear_components).pack(side="left", padx=6)
 
     results_frame = ttk.LabelFrame(root, text="Pressure ladder results")
@@ -1904,9 +2153,9 @@ def launch_gui() -> None:
     headings = {
         "component": "Component",
         "qty": "Qty",
-        "p_in_bar": "P in bar",
-        "dp_bar": "dP bar",
-        "p_out_bar": "P out bar",
+        "p_in_bar": f"P in {pressure_unit.get()}",
+        "dp_bar": f"dP {pressure_unit.get()}",
+        "p_out_bar": f"P out {pressure_unit.get()}",
         "dp_psi": "dP psi",
         "velocity": "v m/s",
         "reynolds": "Re",
