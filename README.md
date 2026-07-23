@@ -3,9 +3,9 @@
 Propulsion design & analysis for GT Propulsive Landers — engine sizing codes,
 feed-system analysis, thermal analysis, and supporting design literature.
 
-> **Provenance:** Re-homed to the `GTPL-Testing` org during the July 2026
+> **Provenance:** Re-homed during the July 2026
 > reorganization. The only structural change from the original
-> [`Propulsive-Landers-GT/Propulsion`](https://github.com/Propulsive-Landers-GT/Propulsion):
+> [`GTPL-Testing/Propulsion`](https://github.com/GTPL-Testing/Propulsion):
 > the loose standalone `.py` calculators that used to sit in the repo root were
 > gathered into [`scripts/`](scripts/). No files were deleted. See the
 > [GTPL-test root README](../README.md) for the full reorg mapping.
